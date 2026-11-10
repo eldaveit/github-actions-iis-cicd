@@ -129,6 +129,7 @@ jobs:
 
 
       # 4. Validar que la aplicación responda
+      
       - name: Health check
         shell: powershell
         run: |
@@ -147,7 +148,8 @@ jobs:
                   }
               }
               catch {
-                  Write-Host "Attempt $i: Application not ready yet."
+                  Write-Host ("Attempt {0}: Application not ready yet." -f $i)
+                  Write-Host $_.Exception.Message
                   Start-Sleep -Seconds 5
               }
           }
@@ -155,3 +157,4 @@ jobs:
           if (-not $success) {
               throw "Health check failed: $url"
           }
+
