@@ -76,6 +76,7 @@ jobs:
           path: C:\Deploy\WebApp
 
       # 3. Detener IIS, copiar archivos y volver a iniciar
+      
       - name: Deploy application to IIS
         shell: powershell
         run: |
@@ -106,17 +107,26 @@ jobs:
 
               $copyResult = $LASTEXITCODE
 
+              Write-Host "Robocopy exit code: $copyResult"
+
               if ($copyResult -ge 8) {
                   throw "Robocopy failed with exit code $copyResult"
               }
+
+              # Robocopy code 0-7 means success.
+              # Reset native exit code for GitHub Actions.
+              $global:LASTEXITCODE = 0
 
               Write-Host "Deployment files copied successfully."
           }
           finally {
               Write-Host "Starting IIS Application Pool: $pool"
 
-              Start-WebAppPool -Name $pool
+              Start-WebAppPool -Name $pool -ErrorAction Stop
+
+              Write-Host "Application Pool started successfully."
           }
+
 
       # 4. Validar que la aplicación responda
       - name: Health check
