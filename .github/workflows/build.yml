@@ -1,5 +1,5 @@
 
-name: Build ASP.NET Core Application
+name: Build and Deploy ASP.NET Core IIS
 
 on:
   push:
@@ -8,39 +8,36 @@ on:
 
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+
+  # ==========================================
+  # JOB 1: BUILD AND PUBLISH
+  # ==========================================
   build:
     name: Build and Publish
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Descargar el código fuente
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # 2. Preparar .NET 10
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      # 3. Restaurar dependencias
       - name: Restore dependencies
         run: dotnet restore src/WebApp/WebApp.csproj
 
-      # 4. Compilar
       - name: Build application
         run: dotnet build src/WebApp/WebApp.csproj --configuration Release --no-restore
 
-      # 5. Publicar aplicación
       - name: Publish application
         run: dotnet publish src/WebApp/WebApp.csproj --configuration Release --no-build --output ./publish
 
-      # 6. Verificar archivos generados
-      - name: List published files
-        run: ls -la ./publish
-
-      # 7. Almacenar artifact
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -48,3 +45,103 @@ jobs:
           path: ./publish/
           if-no-files-found: error
           retention-days: 7
+
+  # ==========================================
+  # JOB 2: DEPLOY TO IIS
+  # ==========================================
+  deploy:
+    name: Deploy to IIS
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+
+      # 1. Preparar directorio temporal
+      - name: Prepare deployment directory
+        shell: powershell
+        run: |
+          $path = "C:\Deploy\WebApp"
+
+          New-Item -ItemType Directory -Path $path -Force | Out-Null
+
+          Get-ChildItem -LiteralPath $path -Force |
+            Remove-Item -Recurse -Force
+
+      # 2. Descargar artifact generado en Ubuntu
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webapp-publish
+          path: C:\Deploy\WebApp
+
+      # 3. Detener IIS, copiar archivos y volver a iniciar
+      - name: Deploy application to IIS
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+
+          $pool = "DevOpsLab"
+          $source = "C:\Deploy\WebApp"
+          $destination = "C:\inetpub\wwwroot\DevOpsLab"
+
+          try {
+              Write-Host "Stopping IIS Application Pool: $pool"
+
+              Stop-WebAppPool -Name $pool
+
+              $timeout = (Get-Date).AddSeconds(30)
+
+              while ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped") {
+                  if ((Get-Date) -gt $timeout) {
+                      throw "Timeout stopping Application Pool"
+                  }
+
+                  Start-Sleep -Seconds 1
+              }
+
+              Write-Host "Copying published files..."
+
+              robocopy $source $destination /E /R:3 /W:5
+
+              $copyResult = $LASTEXITCODE
+
+              if ($copyResult -ge 8) {
+                  throw "Robocopy failed with exit code $copyResult"
+              }
+
+              Write-Host "Deployment files copied successfully."
+          }
+          finally {
+              Write-Host "Starting IIS Application Pool: $pool"
+
+              Start-WebAppPool -Name $pool
+          }
+
+      # 4. Validar que la aplicación responda
+      - name: Health check
+        shell: powershell
+        run: |
+          $url = "http://localhost:8085"
+          $success = $false
+
+          for ($i = 1; $i -le 12; $i++) {
+              try {
+                  $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
+
+                  if ($response.StatusCode -eq 200) {
+                      Write-Host "Application is responding correctly."
+                      Write-Host "HTTP Status: $($response.StatusCode)"
+                      $success = $true
+                      break
+                  }
+              }
+              catch {
+                  Write-Host "Attempt $i: Application not ready yet."
+                  Start-Sleep -Seconds 5
+              }
+          }
+
+          if (-not $success) {
+              throw "Health check failed: $url"
+          }
