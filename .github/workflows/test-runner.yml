@@ -7,7 +7,7 @@ on:
 jobs:
   test-runner:
     name: V Connected to GitHub
-    runs-on: [self-hosted, Windows, X64, iis-lab]
+    runs-on: [self-hosted, Windows, X64]
 
     steps:
       - name: Show Windows information
