@@ -6,7 +6,7 @@ on:
 
 jobs:
   test-runner:
-    name: Verify Windows Runner
+    name: V Connected to GitHub
     runs-on: [self-hosted, Windows, X64, iis-lab]
 
     steps:
