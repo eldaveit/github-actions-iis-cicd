@@ -1,0 +1,29 @@
+
+name: Test Self-Hosted Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    name: Verify Windows Runner
+    runs-on: [self-hosted, Windows, X64, iis-lab]
+
+    steps:
+      - name: Show Windows information
+        shell: powershell
+        run: |
+          Write-Host "Runner connected successfully"
+          Write-Host "Computer: $env:COMPUTERNAME"
+          Write-Host "User: $(whoami)"
+          Write-Host "PowerShell version: $($PSVersionTable.PSVersion)"
+
+      - name: Check IIS service
+        shell: powershell
+        run: |
+          Get-Service W3SVC | Format-Table Name, Status
+
+      - name: Check .NET SDK
+        shell: powershell
+        run: |
+          dotnet --info
