@@ -34,12 +34,24 @@ jobs:
       - name: Publish application
         run: dotnet publish src/WebApp --configuration Release --no-build --output ./publish
 
+      - name: Create release metadata file
+        shell: bash
+        run: |
+          cat > ./publish/release-info.txt << EOF
+          Release ID: ${GITHUB_RUN_ID}
+          Commit SHA: ${GITHUB_SHA}
+          Branch: ${GITHUB_REF_NAME}
+          Build date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+
+      
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: webapp-publish
+          name: webapp-publish-${{ github.run_id }}
           path: ./publish
-          retention-days: 7
+          retention-days: 30
+
 
   # -------------------------------------
   # 2. DEPLOY QA
@@ -57,8 +69,8 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: webapp-publish
-          path: C:\Deploy\WebApp
+          name: webapp-publish-${{ github.run_id }}
+          path: C:\Deploy\Releases\${{ github.run_id }}
 
       
       - name: Deploy QA with Rollback
@@ -68,7 +80,7 @@ jobs:
 
           $appPool = "DevOpsLab"
           $destination = "C:\inetpub\wwwroot\DevOpsLab"
-          $source = "C:\Deploy\WebApp"
+          $source = "C:\Deploy\Releases\${{ github.run_id }}"
           $backupRoot = "C:\Deploy\Backups\QA"
           $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
           $backup = Join-Path $backupRoot $timestamp
@@ -201,11 +213,12 @@ jobs:
       name: PROD
 
     steps:
+      
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: webapp-publish
-          path: C:\Deploy\WebApp
+          name: webapp-publish-${{ github.run_id }}
+          path: C:\Deploy\Releases\${{ github.run_id }}
 
       - name: Deploy PROD with Rollback
         shell: powershell
@@ -214,7 +227,7 @@ jobs:
 
           $appPool = "DevOpsLab-PROD"
           $destination = "C:\inetpub\wwwroot\DevOpsLab-PROD"
-          $source = "C:\Deploy\WebApp"
+          $source = "C:\Deploy\Releases\${{ github.run_id }}"
           $backupRoot = "C:\Deploy\Backups\PROD"
           $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
           $backup = Join-Path $backupRoot $timestamp
