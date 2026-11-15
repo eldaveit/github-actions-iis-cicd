@@ -1,0 +1,131 @@
+
+name: Manual Rollback IIS
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: 'Release ID to restore'
+        required: true
+        type: string
+
+jobs:
+  rollback-qa:
+    name: Rollback QA
+    runs-on: [self-hosted, Windows, X64]
+
+    environment:
+      name: QA
+
+    steps:
+      - name: Validate release
+        shell: powershell
+        run: |
+          $releaseId = "${{ inputs.release_id }}"
+          $releasePath = "C:\Deploy\Releases\$releaseId"
+
+          if ($releaseId -notmatch '^\d+$') {
+              throw "Invalid release ID."
+          }
+
+          if (!(Test-Path "$releasePath\release-info.txt")) {
+              throw "Release $releaseId does not exist."
+          }
+
+          Write-Host "Release found: $releasePath"
+          Get-Content "$releasePath\release-info.txt"
+
+      - name: Rollback QA with selected release
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+
+          $releaseId = "${{ inputs.release_id }}"
+          $source = "C:\Deploy\Releases\$releaseId"
+          $destination = "C:\inetpub\wwwroot\DevOpsLab"
+          $backupRoot = "C:\Deploy\Backups\QA"
+          $appPool = "DevOpsLab"
+
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+          $backup = Join-Path $backupRoot "manual-$timestamp"
+
+          $poolStopped = $false
+          $rollbackSucceeded = $false
+
+          try {
+              Write-Host "Backing up current QA version..."
+
+              New-Item -ItemType Directory -Path $backup -Force | Out-Null
+
+              robocopy $destination $backup /MIR /R:3 /W:5
+              if ($LASTEXITCODE -ge 8) {
+                  throw "Current version backup failed."
+              }
+
+              Write-Host "Stopping QA AppPool..."
+              Stop-WebAppPool -Name $appPool
+              $poolStopped = $true
+
+              Start-Sleep -Seconds 3
+
+              Write-Host "Restoring release $releaseId..."
+
+              robocopy $source $destination /MIR /R:3 /W:5
+              if ($LASTEXITCODE -ge 8) {
+                  throw "Release copy failed."
+              }
+
+              Start-WebAppPool -Name $appPool
+              $poolStopped = $false
+
+              $success = $false
+
+              for ($i = 1; $i -le 10; $i++) {
+                  try {
+                      $response = Invoke-WebRequest `
+                          -Uri "http://localhost:8085" `
+                          -UseBasicParsing `
+                          -TimeoutSec 5
+
+                      if ($response.StatusCode -eq 200) {
+                          $success = $true
+                          break
+                      }
+                  }
+                  catch {
+                      Write-Host ("Health check attempt {0} failed." -f $i)
+                  }
+
+                  Start-Sleep -Seconds 5
+              }
+
+              if (!$success) {
+                  throw "Health check failed after rollback."
+              }
+
+              $rollbackSucceeded = $true
+              Write-Host "QA successfully restored to release $releaseId."
+          }
+          catch {
+              Write-Error "Rollback failed: $_"
+
+              if ($poolStopped -or (Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
+                  Stop-WebAppPool -Name $appPool
+                  Start-Sleep -Seconds 3
+              }
+
+              robocopy $backup $destination /MIR /R:3 /W:5
+              if ($LASTEXITCODE -ge 8) {
+                  throw "CRITICAL: Could not restore the previous QA version."
+              }
+
+              Start-WebAppPool -Name $appPool
+              throw
+          }
+          finally {
+              if ((Get-WebAppPoolState -Name $appPool).Value -ne "Started") {
+                  Start-WebAppPool -Name $appPool
+              }
+
+              $global:LASTEXITCODE = 0
+          }
