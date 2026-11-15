@@ -152,7 +152,27 @@ jobs:
                   throw "Health check failed."
               }
 
-              Write-Host "$environment successfully restored to release $releaseId."
+              & "C:\Deploy\Scripts\Update-DeploymentRegistry.ps1" `
+                  -Environment $environment `
+                  -ReleaseId $releaseId `
+                  -Operation ROLLBACK `
+                  -Status SUCCESS
+
+              # 8. Update deployment registry
+              Write-Host "Updating deployment registry..."
+
+              try {
+                  & "C:\Deploy\Scripts\Update-DeploymentRegistry.ps1" `
+                      -Environment $environment `
+                      -ReleaseId $releaseId `
+                      -Operation ROLLBACK `
+                      -Status SUCCESS
+
+                  Write-Host "Deployment registry updated successfully."
+              }
+              catch {
+                  throw "Failed to update deployment registry: $_"
+              }
           }
           catch {
               Write-Host "ROLLBACK OPERATION FAILED: $_"
