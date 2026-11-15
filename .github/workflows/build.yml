@@ -122,7 +122,7 @@ jobs:
               for ($i = 1; $i -le 10; $i++) {
                   try {
                       $response = Invoke-WebRequest `
-                          -Uri "http://localhost:8087" `
+                          -Uri "http://localhost:8085" `
                           -UseBasicParsing `
                           -TimeoutSec 5
 
@@ -207,7 +207,7 @@ jobs:
           name: webapp-publish
           path: C:\Deploy\WebApp
 
-      - name: Deploy to IIS PROD
+      - name: Deploy PROD with Rollback
         shell: powershell
         run: |
           Import-Module WebAdministration
@@ -215,52 +215,120 @@ jobs:
           $appPool = "DevOpsLab-PROD"
           $destination = "C:\inetpub\wwwroot\DevOpsLab-PROD"
           $source = "C:\Deploy\WebApp"
+          $backupRoot = "C:\Deploy\Backups\PROD"
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+          $backup = Join-Path $backupRoot $timestamp
+
+          $previousVersionExists = $false
+          $poolStopped = $false
+
+          New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 
           try {
-              Write-Host "Stopping PROD AppPool..."
+              # 1. Check whether a previous version exists
+              if ((Test-Path $destination) -and
+                  (Get-ChildItem $destination -Force | Measure-Object).Count -gt 0) {
+
+                  Write-Host "Creating backup: $backup"
+
+                  robocopy $destination $backup /MIR /R:3 /W:5
+                  $backupResult = $LASTEXITCODE
+
+                  if ($backupResult -ge 8) {
+                      throw "Backup failed. Robocopy exit code: $backupResult"
+                  }
+
+                  $previousVersionExists = $true
+              }
+
+              # 2. Stop application pool
+              Write-Host "Stopping AppPool..."
               Stop-WebAppPool -Name $appPool
+              $poolStopped = $true
 
               Start-Sleep -Seconds 3
 
-              Write-Host "Copying application files..."
-              robocopy $source $destination /E /R:3 /W:5
+              # 3. Deploy new version
+              Write-Host "Deploying new version..."
 
-              $copyResult = $LASTEXITCODE
+              robocopy $source $destination /MIR /R:3 /W:5
+              $deployResult = $LASTEXITCODE
 
-              if ($copyResult -ge 8) {
-                  throw "Robocopy failed with exit code $copyResult"
+              if ($deployResult -ge 8) {
+                  throw "Deployment failed. Robocopy exit code: $deployResult"
+              }
+
+              # 4. Start application pool
+              Start-WebAppPool -Name $appPool
+              $poolStopped = $false
+
+              # 5. Health check
+              $success = $false
+
+              for ($i = 1; $i -le 10; $i++) {
+                  try {
+                      $response = Invoke-WebRequest `
+                          -Uri "http://localhost:8086" `
+                          -UseBasicParsing `
+                          -TimeoutSec 5
+
+                      if ($response.StatusCode -eq 200) {
+                          $success = $true
+                          break
+                      }
+                  }
+                  catch {
+                      Write-Host ("Health check attempt {0} failed." -f $i)
+                  }
+
+                  Start-Sleep -Seconds 5
+              }
+
+              if (-not $success) {
+                  throw "Health check failed."
+              }
+
+              Write-Host "QA deployment completed successfully."
+          }
+          catch {
+              Write-Host "DEPLOYMENT FAILED: $_"
+              Write-Host "Starting rollback..."
+
+              if ($previousVersionExists) {
+                  try {
+                      Stop-WebAppPool -Name $appPool
+                      $poolStopped = $true
+
+                      Start-Sleep -Seconds 3
+
+                      robocopy $backup $destination /MIR /R:3 /W:5
+                      $rollbackResult = $LASTEXITCODE
+
+                      if ($rollbackResult -ge 8) {
+                          throw "Rollback copy failed. Robocopy exit code: $rollbackResult"
+                      }
+
+                      Start-WebAppPool -Name $appPool
+                      $poolStopped = $false
+
+                      Write-Host "Previous version restored."
+                  }
+                  catch {
+                      Write-Error "CRITICAL: Rollback failed: $_"
+                      throw
+                  }
+              }
+              else {
+                  Write-Warning "No previous version available. Rollback is not possible."
+              }
+
+              throw
+          }
+          finally {
+              if ($poolStopped) {
+                  Write-Host "Ensuring AppPool is started..."
+                  Start-WebAppPool -Name $appPool
               }
 
               $global:LASTEXITCODE = 0
-          }
-          finally {
-              Write-Host "Starting PROD AppPool..."
-              Start-WebAppPool -Name $appPool
-          }
-
-      - name: PROD Health Check
-        shell: powershell
-        run: |
-          $url = "http://localhost:8086"
-          $success = $false
-
-          for ($i = 1; $i -le 10; $i++) {
-              try {
-                  $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-
-                  if ($response.StatusCode -eq 200) {
-                      Write-Host "PROD application is healthy."
-                      $success = $true
-                      break
-                  }
-              }
-              catch {
-                  Write-Host ("Attempt {0}: Application not ready yet." -f $i)
-              }
-
-              Start-Sleep -Seconds 5
-          }
-
-          if (-not $success) {
-              throw "PROD health check failed."
           }
