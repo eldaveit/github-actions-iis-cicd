@@ -122,7 +122,7 @@ jobs:
               for ($i = 1; $i -le 10; $i++) {
                   try {
                       $response = Invoke-WebRequest `
-                          -Uri "http://localhost:8085" `
+                          -Uri "http://localhost:8087" `
                           -UseBasicParsing `
                           -TimeoutSec 5
 
