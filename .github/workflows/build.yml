@@ -1,27 +1,23 @@
 
-name: Build and Deploy ASP.NET Core IIS
+name: Build and Deploy IIS
 
 on:
   push:
     branches:
       - main
-
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
 
-  # ==========================================
-  # JOB 1: BUILD AND PUBLISH
-  # ==========================================
+  # -------------------------------------
+  # 1. BUILD
+  # -------------------------------------
   build:
-    name: Build and Publish
+    name: Build Application
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup .NET
@@ -30,131 +26,171 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore dependencies
-        run: dotnet restore src/WebApp/WebApp.csproj
+        run: dotnet restore src/WebApp
 
       - name: Build application
-        run: dotnet build src/WebApp/WebApp.csproj --configuration Release --no-restore
+        run: dotnet build src/WebApp --configuration Release --no-restore
 
       - name: Publish application
-        run: dotnet publish src/WebApp/WebApp.csproj --configuration Release --no-build --output ./publish
+        run: dotnet publish src/WebApp --configuration Release --no-build --output ./publish
 
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: webapp-publish
-          path: ./publish/
-          if-no-files-found: error
+          path: ./publish
           retention-days: 7
 
-  # ==========================================
-  # JOB 2: DEPLOY TO IIS
-  # ==========================================
-  deploy:
-    name: Deploy to IIS
+  # -------------------------------------
+  # 2. DEPLOY QA
+  # -------------------------------------
+  deploy-qa:
+    name: Deploy to QA
+    runs-on: [self-hosted, Windows, X64]
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Windows, X64]
+
+    environment:
+      name: QA
 
     steps:
-
-      # 1. Preparar directorio temporal
-      - name: Prepare deployment directory
-        shell: powershell
-        run: |
-          $path = "C:\Deploy\WebApp"
-
-          New-Item -ItemType Directory -Path $path -Force | Out-Null
-
-          Get-ChildItem -LiteralPath $path -Force |
-            Remove-Item -Recurse -Force
-
-      # 2. Descargar artifact generado en Ubuntu
-      - name: Download build artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: webapp-publish
           path: C:\Deploy\WebApp
 
-      # 3. Detener IIS, copiar archivos y volver a iniciar
-      
-      - name: Deploy application to IIS
+      - name: Deploy to IIS QA
         shell: powershell
         run: |
           Import-Module WebAdministration
 
-          $pool = "DevOpsLab"
-          $source = "C:\Deploy\WebApp"
+          $appPool = "DevOpsLab"
           $destination = "C:\inetpub\wwwroot\DevOpsLab"
+          $source = "C:\Deploy\WebApp"
 
           try {
-              Write-Host "Stopping IIS Application Pool: $pool"
+              Write-Host "Stopping QA AppPool..."
+              Stop-WebAppPool -Name $appPool
 
-              Stop-WebAppPool -Name $pool
+              Start-Sleep -Seconds 3
 
-              $timeout = (Get-Date).AddSeconds(30)
-
-              while ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped") {
-                  if ((Get-Date) -gt $timeout) {
-                      throw "Timeout stopping Application Pool"
-                  }
-
-                  Start-Sleep -Seconds 1
-              }
-
-              Write-Host "Copying published files..."
-
+              Write-Host "Copying application files..."
               robocopy $source $destination /E /R:3 /W:5
 
               $copyResult = $LASTEXITCODE
-
-              Write-Host "Robocopy exit code: $copyResult"
 
               if ($copyResult -ge 8) {
                   throw "Robocopy failed with exit code $copyResult"
               }
 
-              # Robocopy code 0-7 means success.
-              # Reset native exit code for GitHub Actions.
               $global:LASTEXITCODE = 0
-
-              Write-Host "Deployment files copied successfully."
           }
           finally {
-              Write-Host "Starting IIS Application Pool: $pool"
-
-              Start-WebAppPool -Name $pool -ErrorAction Stop
-
-              Write-Host "Application Pool started successfully."
+              Write-Host "Starting QA AppPool..."
+              Start-WebAppPool -Name $appPool
           }
 
-
-      # 4. Validar que la aplicación responda
-      
-      - name: Health check
+      - name: QA Health Check
         shell: powershell
         run: |
           $url = "http://localhost:8085"
           $success = $false
 
-          for ($i = 1; $i -le 12; $i++) {
+          for ($i = 1; $i -le 10; $i++) {
               try {
                   $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
 
                   if ($response.StatusCode -eq 200) {
-                      Write-Host "Application is responding correctly."
-                      Write-Host "HTTP Status: $($response.StatusCode)"
+                      Write-Host "QA application is healthy."
                       $success = $true
                       break
                   }
               }
               catch {
                   Write-Host ("Attempt {0}: Application not ready yet." -f $i)
-                  Write-Host $_.Exception.Message
-                  Start-Sleep -Seconds 5
               }
+
+              Start-Sleep -Seconds 5
           }
 
           if (-not $success) {
-              throw "Health check failed: $url"
+              throw "QA health check failed."
           }
 
+  # -------------------------------------
+  # 3. DEPLOY PROD
+  # -------------------------------------
+  deploy-prod:
+    name: Deploy to PROD
+    runs-on: [self-hosted, Windows, X64]
+    needs: deploy-qa
+    if: github.ref == 'refs/heads/main'
+
+    environment:
+      name: PROD
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webapp-publish
+          path: C:\Deploy\WebApp
+
+      - name: Deploy to IIS PROD
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+
+          $appPool = "DevOpsLab-PROD"
+          $destination = "C:\inetpub\wwwroot\DevOpsLab-PROD"
+          $source = "C:\Deploy\WebApp"
+
+          try {
+              Write-Host "Stopping PROD AppPool..."
+              Stop-WebAppPool -Name $appPool
+
+              Start-Sleep -Seconds 3
+
+              Write-Host "Copying application files..."
+              robocopy $source $destination /E /R:3 /W:5
+
+              $copyResult = $LASTEXITCODE
+
+              if ($copyResult -ge 8) {
+                  throw "Robocopy failed with exit code $copyResult"
+              }
+
+              $global:LASTEXITCODE = 0
+          }
+          finally {
+              Write-Host "Starting PROD AppPool..."
+              Start-WebAppPool -Name $appPool
+          }
+
+      - name: PROD Health Check
+        shell: powershell
+        run: |
+          $url = "http://localhost:8086"
+          $success = $false
+
+          for ($i = 1; $i -le 10; $i++) {
+              try {
+                  $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
+
+                  if ($response.StatusCode -eq 200) {
+                      Write-Host "PROD application is healthy."
+                      $success = $true
+                      break
+                  }
+              }
+              catch {
+                  Write-Host ("Attempt {0}: Application not ready yet." -f $i)
+              }
+
+              Start-Sleep -Seconds 5
+          }
+
+          if (-not $success) {
+              throw "PROD health check failed."
+          }
